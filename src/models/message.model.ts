@@ -13,7 +13,8 @@ interface IMessage extends mongoose.Document {
     contentType: String;
   };
   date: Date;
-  sent: Boolean;
+  sent: boolean;
+  isCoachingMessage: boolean;
 }
 
 const MessageSchema = new Schema({
@@ -27,6 +28,7 @@ const MessageSchema = new Schema({
   },
   date: { type: mongoose.Schema.Types.Date, required: true },
   sent: { type: mongoose.Schema.Types.Boolean, default: false },
+  isCoachingMessage: { type: Boolean, required: true, default: false },
 });
 
 const Message = mongoose.model<IMessage>('Message', MessageSchema);

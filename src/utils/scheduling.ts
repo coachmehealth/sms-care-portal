@@ -1,10 +1,10 @@
-/* eslint-disable no-console */
 import { ObjectId } from 'mongodb';
 import { Message, IMessage } from '../models/message.model';
 import {
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   TWILIO_FROM_NUMBER,
+  TWILIO_FROM_NUMBER_GENERAL,
 } from './config';
 import { Patient } from '../models/patient.model';
 
@@ -25,24 +25,26 @@ const getPatientIdFromNumber = (number: any) => {
     });
 };
 
+export const getTwilioNumber = (isCoachingMessage: boolean) => {
+  if (isCoachingMessage) {
+    return TWILIO_FROM_NUMBER_GENERAL;
+  }
+  return TWILIO_FROM_NUMBER;
+};
+
 // sends message, marks it as sent
-const sendMessage = (msg: IMessage) => {
+const sendMessage = async (msg: IMessage) => {
+  const twilioNumber = getTwilioNumber(msg.isCoachingMessage);
   twilio.messages.create({
     body: msg.message,
-    from: TWILIO_FROM_NUMBER,
+    from: twilioNumber,
     to: msg.phoneNumber,
   });
 
-  Message.findOneAndUpdate(
+  await Message.findOneAndUpdate(
     { _id: msg.id },
     {
       sent: true,
-    },
-    {},
-    (err: any) => {
-      if (err) {
-        console.log(err);
-      }
     },
   );
 
@@ -56,24 +58,20 @@ const sendMessage = (msg: IMessage) => {
 };
 
 // selects all messages which should be sent within the next __ seconds, and schedules them to be sent
-const scheduleMessages = (interval: number) => {
+const scheduleMessages = async (interval: number) => {
   const intervalStart = new Date();
   const intervalEnd = new Date(intervalStart.getTime());
   intervalEnd.setSeconds(intervalEnd.getSeconds() + interval);
+  const messages = await Message.find({
+    date: {
+      $lt: intervalEnd,
+    },
+    sent: false,
+  });
 
-  Message.find(
-    {
-      date: {
-        $lt: intervalEnd,
-      },
-      sent: false,
-    },
-    (err, docs) => {
-      docs.forEach((doc) => {
-        sendMessage(doc);
-      });
-    },
-  );
+  messages.forEach((message: any) => {
+    sendMessage(message);
+  });
 };
 
 const initializeScheduler = () => {
