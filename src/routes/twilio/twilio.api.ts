@@ -1,65 +1,28 @@
-/* eslint-disable radix */
 import express from 'express';
-import { ObjectId } from 'mongodb';
-import twilio from 'twilio';
 import bodyParser from 'body-parser';
-
-import { Message } from '../../models/message.model';
-import {
-  TWILIO_ACCOUNT_SID,
-  TWILIO_AUTH_TOKEN,
-  TWILIO_FROM_NUMBER,
-} from '../../utils/config';
-
-import { Outcome } from '../../models/outcome.model';
-import { PatientForPhoneNumber } from '../../models/patient.model';
+import twilio from 'twilio';
+import { ObjectId } from 'mongodb';
 import auth from '../../middleware/auth';
+import { PatientForPhoneNumber } from '../../models/patient.model';
 import { parseInboundPatientMessage } from '../../domain/message_parsing';
 import { responseForParsedMessage } from '../../domain/glucose_reading_responses';
-
-const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-const { MessagingResponse } = twilio.twiml;
+import { Outcome } from '../../models/outcome.model';
+import { Message } from '../../models/message.model';
+import errorHandler from '../error';
 
 const router = express.Router();
 router.use(bodyParser.urlencoded({ extended: true }));
 
+const { MessagingResponse } = twilio.twiml;
+
 const UNRECOGNIZED_PATIENT_RESPONSE =
   'We do not recognize this number. Please contact CoachMe support.';
 
-router.post('/sendMessage', auth, (req, res) => {
-  const content = req.body.message;
-  const recept = req.body.to;
-  const patientID = new ObjectId(req.body.patientID);
-  const date = new Date();
-
-  twilioClient.messages.create({
-    body: content,
-    from: TWILIO_FROM_NUMBER,
-    to: recept,
-  });
-
-  const outgoingMessage = new Message({
-    sent: true,
-    phoneNumber: TWILIO_FROM_NUMBER,
-    patientID,
-    message: content,
-    sender: 'COACH',
-    date,
-  });
-
-  outgoingMessage
-    .save()
-    .then(() => {
-      res.status(200).send({
-        success: true,
-        msg: outgoingMessage,
-      });
-    })
-    .catch((err) => console.log(err));
-});
-
-// this route receives and parses the message from one user, then responds accordingly with the appropriate output
-router.post('/reply', async (req, res) => {
+export const manageIncomingMessages = async (
+  req: any,
+  res: any,
+  incoming: 'Glucose' | 'General',
+) => {
   const twiml = new MessagingResponse();
 
   const inboundMessage = req.body.Body || 'Invalid Text (image)';
@@ -67,59 +30,127 @@ router.post('/reply', async (req, res) => {
   const date = new Date();
 
   const patient = await PatientForPhoneNumber(fromPhoneNumber);
-
   if (!patient) {
     const twilioResponse = twiml.message(UNRECOGNIZED_PATIENT_RESPONSE);
 
-    res.writeHead(200, { 'Content-Type': 'text/xml' });
+    res.writeHead(204, { 'Content-Type': 'text/xml' });
     res.end(twilioResponse.toString());
     return;
   }
-
-  const incomingMessage = new Message({
-    sent: true,
-    phoneNumber: req.body.From,
-    patientID: patient._id,
-    message: inboundMessage,
-    sender: 'PATIENT',
-    date,
-  });
-
-  await incomingMessage.save();
-
-  const parsedResponse = parseInboundPatientMessage(inboundMessage);
-
-  if (parsedResponse.glucoseReading) {
-    const outcome = new Outcome({
-      phoneNumber: fromPhoneNumber,
+  try {
+    const incomingMessage = new Message({
+      sent: true,
+      phoneNumber: req.body.From,
       patientID: patient._id,
-      response: inboundMessage,
-      value: parsedResponse.glucoseReading.score,
-      alertType: parsedResponse.glucoseReading.classification,
+      message: inboundMessage,
+      sender: 'PATIENT',
       date,
+      isCoachingMessage: incoming === 'General',
     });
 
-    await outcome.save();
+    await incomingMessage.save();
+
+    if (incoming === 'General') {
+      res.writeHead(200, { 'Content-Type': 'text/xml' });
+      res.end(incomingMessage.sent.toString());
+    }
+  } catch (e) {
+    if (typeof e === 'string') {
+      errorHandler(res, e);
+    } else if (e instanceof Error) {
+      errorHandler(res, e.message);
+    }
   }
+  if (incoming === 'Glucose') {
+    const parsedResponse = parseInboundPatientMessage(inboundMessage);
 
-  const responseMessage = await responseForParsedMessage(
-    parsedResponse,
-    patient.language,
-  );
+    try {
+      if (parsedResponse.glucoseReading) {
+        const outcome = new Outcome({
+          phoneNumber: fromPhoneNumber,
+          patientID: patient._id,
+          response: inboundMessage,
+          value: parsedResponse.glucoseReading.score,
+          alertType: parsedResponse.glucoseReading.classification,
+          date,
+        });
 
-  const outgoingMessage = new Message({
-    sent: true,
-    phoneNumber: fromPhoneNumber,
-    patientID: patient._id, // lost on this
-    message: responseMessage,
-    sender: 'BOT',
-    date,
-  });
+        await outcome.save();
+      }
+    } catch (e) {
+      if (typeof e === 'string') {
+        errorHandler(res, e);
+      } else if (e instanceof Error) {
+        errorHandler(res, e.message);
+      }
+    }
 
-  await outgoingMessage.save();
+    const responseMessage = await responseForParsedMessage(
+      parsedResponse,
+      patient.language,
+    );
+    try {
+      const outgoingMessage = new Message({
+        sent: false,
+        phoneNumber: fromPhoneNumber,
+        patientID: patient._id, // lost on this
+        message: responseMessage,
+        sender: 'BOT',
+        date,
+      });
 
-  res.writeHead(200, { 'Content-Type': 'text/xml' });
-  res.end(twiml.message(responseMessage).toString());
-});
+      await outgoingMessage.save();
+    } catch (e) {
+      if (typeof e === 'string') {
+        errorHandler(res, e);
+      } else if (e instanceof Error) {
+        errorHandler(res, e.message);
+      }
+    }
+
+    res.writeHead(200, { 'Content-Type': 'text/xml' });
+    res.end(twiml.message(responseMessage).toString());
+  }
+};
+
+export const sendMessage = async (req: any, res: any) => {
+  try {
+    const recept = req.body.to;
+    const patientID = new ObjectId(req.body.patientID);
+    const date = new Date();
+    const content = req.body.message;
+    const outgoingMessage = new Message({
+      sent: false,
+      phoneNumber: recept,
+      patientID,
+      message: content,
+      sender: 'COACH',
+      date,
+      isCoachingMessage: true,
+    });
+
+    await outgoingMessage.save();
+    res.status(200).send({
+      success: true,
+      msg: outgoingMessage,
+    });
+  } catch (e) {
+    if (typeof e === 'string') {
+      errorHandler(res, e);
+    } else if (e instanceof Error) {
+      errorHandler(res, e.message);
+    }
+  }
+};
+
+router.post('/sendMessage', auth, async (req, res) => sendMessage(req, res));
+
+router.post('/reply', async (req, res) =>
+  manageIncomingMessages(req, res, 'Glucose'),
+);
+
+router.post('/receive', async (req, res) =>
+  manageIncomingMessages(req, res, 'General'),
+);
 
 export default router;
